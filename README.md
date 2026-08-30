@@ -1,6 +1,7 @@
 # TabgenQA
 
-A web-based demo for generating tabular Question-Answering benchmarks, powered by Gradino. Submitted to the CIKM 2026 conference demo track.
+A web-based demo for generating tabular Question-Answering benchmarks, powered by Gradino. Submitted to the CIKM 2026 conference demo track.  
+For any help setting up the system, open a Github issue or write to `micheleluca.contalbo@unimore.it`
 
 ## Features
 
