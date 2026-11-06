@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TabQA Generator — Tabular QA Benchmark Generator</title>
+  <title>TabgenQA</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -57,7 +57,7 @@
     input[type=number]::-webkit-inner-spin-button{opacity:.7}
     .modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.55);backdrop-filter:blur(4px);z-index:40}
     .modal-panel{position:fixed;top:0;right:0;bottom:0;width:min(900px,100vw);background:#fff;z-index:50;overflow:hidden;display:flex;flex-direction:column;box-shadow:-8px 0 40px rgba(0,0,0,.18)}
-    .modal-panel-sm{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(560px,95vw);background:#fff;z-index:50;border-radius:16px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.2)}
+    .modal-panel-sm{position:fixed;inset:0;margin:auto;height:fit-content;max-height:90vh;width:min(560px,95vw);background:#fff;z-index:50;border-radius:16px;overflow-y:auto;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.2)}
     .tab-active{border-bottom:2px solid #4f46e5;color:#4f46e5;font-weight:600}
     .tab-inactive{border-bottom:2px solid transparent;color:#64748b}
     .nav-tab-active{background:#eef2ff;color:#4f46e5;font-weight:600}
@@ -511,18 +511,27 @@ function InstanceEditorModal({ instance, taskId, onSave, onClose }) {
   const [tableIdx, setTableIdx] = us(0);
   const [saving, setSaving] = us(false);
   const [saved, setSaved] = us(false);
+  const [saveError, setSaveError] = us('');
 
   async function handleSave() {
     setSaving(true);
+    setSaveError('');
     try {
-      await fetch(`/api/tasks/${taskId}/instances/${instance.id}`, {
+      const res = await fetch(`/api/tasks/${taskId}/instances/${instance.id}`, {
         method: 'PUT',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ question, answer, tables }),
       });
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch (e) {}
+        throw new Error(detail);
+      }
       onSave({ ...instance, question, answer, tables });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setSaveError(`Save failed: ${e.message}`);
     } finally {
       setSaving(false);
     }
@@ -645,6 +654,7 @@ function InstanceEditorModal({ instance, taskId, onSave, onClose }) {
           <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">
             Cancel
           </button>
+          {saveError && <p className="text-xs text-red-600 font-medium flex-1 text-right px-3">{saveError}</p>}
           <button onClick={handleSave} disabled={saving}
             className="flex items-center gap-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-60">
             {saving ? <Ico.Loader className="w-4 h-4 spin"/> : saved ? <Ico.Check className="w-4 h-4"/> : <Ico.Save className="w-4 h-4"/>}
@@ -673,6 +683,19 @@ function ConfigPanel({ params, onChange, onGenerate, disabled }) {
     );
   }
 
+  // While the user has not edited it, Col. Cardinality follows the suggested value
+  function update(next) {
+    if (next.col_cardinality_auto !== false) next = { ...next, col_cardinality: suggestedColCardinality(next) };
+    onChange(next);
+  }
+
+  const isAblation = params.num_tables === -1;
+  const suggestedCard = suggestedColCardinality(params);
+  const cardValue = parseInt(params.col_cardinality);
+  const minParallelCard = isAblation ? Math.max(...ABLATION_TABLES.parallel) : Math.max(2, parseInt(params.num_tables) || 2);
+  const toggleCls = (on) => `relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0 ${on ? 'bg-indigo-600' : 'bg-slate-300'}`;
+  const knobCls = (on) => `inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-6' : 'translate-x-1'}`;
+
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
       <div className="flex items-center gap-2 mb-6">
@@ -687,7 +710,7 @@ function ConfigPanel({ params, onChange, onGenerate, disabled }) {
 
       <div className="space-y-4">
         {field('Domain', 'domain',
-          <select value={params.domain} onChange={e=>onChange({...params,domain:e.target.value})} className={selectCls} disabled={disabled}>
+          <select value={params.domain} onChange={e=>update({...params,domain:e.target.value})} className={selectCls} disabled={disabled}>
             <option value="environmental">Environmental</option>
             <option value="finance">Finance</option>
             <option value="healthcare">Healthcare</option>
@@ -695,8 +718,35 @@ function ConfigPanel({ params, onChange, onGenerate, disabled }) {
             <option value="custom">Custom</option>
           </select>
         )}
+        {params.domain === 'custom' && (
+          <p className="-mt-2 text-xs text-slate-500">
+            You'll be asked for the topic when you click <strong>Generate Benchmark</strong>. Unit conversion is disabled for custom domains.
+            {params.domain_description && <span className="block truncate" title={params.domain_description}>Last topic: {params.domain_description}</span>}
+          </p>
+        )}
+        <div>
+          <label className={labelCls}>Table Content</label>
+          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Table content">
+            {[['complex','Complex (default)'],['simple','Simple']].map(([style, label]) => (
+              <button key={style} disabled={disabled} role="radio" aria-checked={(params.content_style || 'complex') === style}
+                onClick={() => onChange({ ...params, content_style: style })}
+                className={`px-3 py-2 rounded-lg text-xs font-semibold text-left transition-all border ${
+                  (params.content_style || 'complex') === style
+                    ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 disabled:opacity-50'
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[11px] text-slate-400 leading-snug">
+            {(params.content_style || 'complex') === 'simple'
+              ? 'Short, relational-style column names and values.'
+              : 'Verbose, web-table-like column names and values.'}
+          </p>
+        </div>
         {field('Question Type', 'question_type',
-          <select value={params.question_type} onChange={e=>onChange({...params,question_type:e.target.value})} className={selectCls} disabled={disabled}>
+          <select value={params.question_type} onChange={e=>update({...params,question_type:e.target.value})} className={selectCls} disabled={disabled}>
             <option value="sum">Sum</option>
             <option value="average">Average</option>
             <option value="superlative">Superlative (Max/Min)</option>
@@ -704,30 +754,63 @@ function ConfigPanel({ params, onChange, onGenerate, disabled }) {
         )}
         <div className="grid grid-cols-2 gap-4">
           {field('Number of Tables', 'num_tables',
-            <input type="number" min="-1" max="20" value={params.num_tables} disabled={disabled}
-              onChange={e=>onChange({...params,num_tables:parseInt(e.target.value)||3})} className={numberCls}/>
+            <input type="number" min="2" step="1"
+              value={isAblation ? '' : params.num_tables}
+              placeholder={isAblation ? 'ablation' : ''}
+              disabled={disabled || isAblation}
+              onChange={e => { const v = parseInt(e.target.value); update({...params, num_tables: isNaN(v) ? '' : v}); }}
+              onBlur={() => { if (!isAblation) update({...params, num_tables: Math.max(2, parseInt(params.num_tables) || 2)}); }}
+              className={numberCls}/>
           )}
           {field('Num Samples', 'num_samples',
             <input type="number" min="1" max="500" value={params.num_samples} disabled={disabled}
-              onChange={e=>onChange({...params,num_samples:parseInt(e.target.value)||10})} className={numberCls}/>
+              onChange={e=>update({...params,num_samples:parseInt(e.target.value)||10})} className={numberCls}/>
           )}
           {field('Col. Cardinality', 'col_cardinality',
-            <input type="number" min="2" max="100" value={params.col_cardinality} disabled={disabled}
-              onChange={e=>onChange({...params,col_cardinality:parseInt(e.target.value)||20})} className={numberCls}/>
+            <div>
+              <input type="number" min="2" value={params.col_cardinality} disabled={disabled}
+                title="Distinct values per attribute in the latent relational source"
+                onChange={e => { const v = parseInt(e.target.value); onChange({...params, col_cardinality: isNaN(v) ? '' : v, col_cardinality_auto: false}); }}
+                onBlur={() => onChange({...params, col_cardinality: Math.max(2, parseInt(params.col_cardinality) || suggestedCard)})}
+                className={numberCls}/>
+              <p className="text-[11px] text-slate-400 mt-1 leading-snug">
+                Suggested: <strong className="text-slate-600">{suggestedCard}</strong>
+                {params.sequential ? ' (sequential default)' : ' (one value per table)'}
+                {cardValue !== suggestedCard && !disabled && (
+                  <button type="button" onClick={() => onChange({...params, col_cardinality: suggestedCard, col_cardinality_auto: true})}
+                    className="ml-1 text-indigo-500 hover:underline">use</button>
+                )}
+              </p>
+              {!params.sequential && cardValue < minParallelCard && (
+                <p className="text-[11px] text-amber-600 mt-0.5 leading-snug">Raised to {minParallelCard} at generation (parallel needs one value per table)</p>
+              )}
+            </div>
           )}
           {field('Num Columns', 'num_columns',
-            <input type="number" min="2" max="100" value={params.num_columns} disabled={disabled}
-              onChange={e=>onChange({...params,num_columns:parseInt(e.target.value)||21})} className={numberCls}/>
+            <input type="number" min="2" value={params.num_columns} disabled={disabled}
+              onChange={e=>update({...params,num_columns:parseInt(e.target.value)||21})} className={numberCls}/>
           )}
         </div>
-        <div className="flex items-center justify-between py-2 px-3 bg-slate-50 rounded-lg">
+        <div className="flex items-center justify-between gap-3 py-2 px-3 bg-slate-50 rounded-lg">
+          <div>
+            <p className="text-sm font-medium text-slate-700">Ablation Mode</p>
+            <p className="text-xs text-slate-500">Generate the same samples over {(params.sequential ? ABLATION_TABLES.sequential : ABLATION_TABLES.parallel).join(', ')} tables</p>
+          </div>
+          <button onClick={() => update(isAblation
+              ? {...params, num_tables: params.last_num_tables || 3}
+              : {...params, num_tables: -1, last_num_tables: Math.max(2, parseInt(params.num_tables) || 3)})}
+            disabled={disabled} className={toggleCls(isAblation)}>
+            <span className={knobCls(isAblation)}/>
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-3 py-2 px-3 bg-slate-50 rounded-lg">
           <div>
             <p className="text-sm font-medium text-slate-700">Sequential Mode</p>
             <p className="text-xs text-slate-500">Multi-hop questions across tables</p>
           </div>
-          <button onClick={()=>onChange({...params,sequential:!params.sequential})} disabled={disabled}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${params.sequential ? 'bg-indigo-600' : 'bg-slate-300'}`}>
-            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${params.sequential ? 'translate-x-6' : 'translate-x-1'}`}/>
+          <button onClick={()=>update({...params,sequential:!params.sequential})} disabled={disabled}
+            className={toggleCls(params.sequential)}>
+            <span className={knobCls(params.sequential)}/>
           </button>
         </div>
 
@@ -754,10 +837,16 @@ function ConfigPanel({ params, onChange, onGenerate, disabled }) {
             {(params.perturbation_mode || 'random') === 'fixed' && (
               <div className="bg-slate-50 rounded-lg border border-slate-200 p-3 space-y-2.5">
                 {PERTURBATION_OPTIONS.map(opt => {
-                  const checked = (params.perturbations || []).includes(opt.value);
+                  // unit conversion is never applied to custom topics (no unit catalogue) or sequential questions
+                  const unitLockReason = opt.value !== 'unit_converted' ? null
+                    : params.domain === 'custom' ? 'custom domains'
+                    : params.sequential ? 'sequential questions' : null;
+                  const unitLocked = unitLockReason !== null;
+                  const checked = !unitLocked && (params.perturbations || []).includes(opt.value);
                   return (
-                    <label key={opt.value} className="flex items-start gap-2.5 cursor-pointer">
-                      <input type="checkbox" disabled={disabled}
+                    <label key={opt.value} className={`flex items-start gap-2.5 ${unitLocked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                      title={unitLocked ? `Unit conversion is disabled for ${unitLockReason}` : undefined}>
+                      <input type="checkbox" disabled={disabled || unitLocked}
                         className="mt-0.5 accent-indigo-600 w-3.5 h-3.5 flex-shrink-0"
                         checked={checked}
                         onChange={e => {
@@ -770,24 +859,30 @@ function ConfigPanel({ params, onChange, onGenerate, disabled }) {
                       />
                       <div>
                         <p className="text-xs font-medium text-slate-700">{opt.label}</p>
-                        <p className="text-[11px] text-slate-400">{opt.desc}</p>
+                        <p className="text-[11px] text-slate-400">{unitLocked ? `Disabled for ${unitLockReason}` : opt.desc}</p>
                       </div>
                     </label>
                   );
                 })}
               </div>
             )}
+            <p className="text-[11px] text-slate-400 px-1 leading-snug">
+              {(params.perturbation_mode || 'random') === 'fixed'
+                ? 'Exactly the checked perturbations are applied to every table.'
+                : 'Each perturbation is applied at random (50% chance per table).'}
+              {params.sequential && ' Unit conversion options apply to parallel questions only.'}
+            </p>
             {(params.perturbation_mode || 'random') === 'fixed' && (params.perturbations || []).length === 0 && (
               <p className="text-[11px] text-red-500 px-1">Select at least one perturbation type.</p>
             )}
           </div>
         </div>
 
-        {params.num_tables === -1 && (
+        {isAblation && (
           <div className="flex gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
             <Ico.AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5"/>
             <p className="text-xs text-amber-700">
-              <strong>Ablation mode:</strong> Setting num_tables to -1 runs ablations over [2, 3, 5, 10, 20] tables automatically.
+              <strong>Ablation mode:</strong> each sample is generated over [{(params.sequential ? ABLATION_TABLES.sequential : ABLATION_TABLES.parallel).join(', ')}] tables.
             </p>
           </div>
         )}
@@ -879,6 +974,66 @@ const MODEL_LABELS = {
   gemini: 'Gemini (Google)',
   huggingface: 'HuggingFace (vLLM)',
 };
+
+const MAX_DOMAIN_DESCRIPTION = 2000;
+
+// Asked when generating on the "custom" domain: Gradino has no few-shot tables for it,
+// so the tables are designed from this topic / description alone.
+function CustomTopicModal({ initialTopic, onConfirm, onClose }) {
+  const { useState: us, useEffect: ue, useRef: ur } = React;
+  const [topic, setTopic] = us(initialTopic || '');
+  const ref = ur(null);
+  ue(() => { if (ref.current) { ref.current.focus(); ref.current.select(); } }, []);
+  ue(() => {
+    const onKey = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const trimmed = topic.trim();
+  const tooLong = trimmed.length > MAX_DOMAIN_DESCRIPTION;
+  const submit = () => { if (trimmed && !tooLong) onConfirm(trimmed); };
+  const labelCls = "block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5";
+  return (
+    <>
+      <div className="modal-backdrop" onClick={onClose}/>
+      <div className="modal-panel-sm fade-up" role="dialog" aria-modal="true" aria-labelledby="custom-topic-title">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center">
+              <Ico.Sparkles className="w-4 h-4 text-indigo-600"/>
+            </div>
+            <div>
+              <h2 id="custom-topic-title" className="text-base font-bold text-slate-900">Custom Domain</h2>
+              <p className="text-xs text-slate-500">What should the tables be about?</p>
+            </div>
+          </div>
+          <button onClick={onClose} aria-label="Close" className="p-2 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
+            <Ico.X className="w-5 h-5"/>
+          </button>
+        </div>
+        <div className="p-6 space-y-3">
+          <label htmlFor="custom-topic" className={labelCls}>Topic or description</label>
+          <textarea id="custom-topic" ref={ref} rows={4} value={topic}
+            onChange={e => setTopic(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit(); }}
+            placeholder="e.g. Professional football: player performance statistics in European leagues"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition-shadow resize-y"/>
+          <div className="flex justify-between text-xs">
+            <span className="text-slate-500">A short topic or a few sentences. No example tables are used for custom domains.</span>
+            <span className={tooLong ? 'text-red-600 font-semibold' : 'text-slate-400'}>{trimmed.length}/{MAX_DOMAIN_DESCRIPTION}</span>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-100 transition-colors">Cancel</button>
+          <button onClick={submit} disabled={!trimmed || tooLong}
+            className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+            Generate
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
 
 function EvaluateModal({ taskId, instanceCount, defaultApiKey, onClose, onDone }) {
   const { useState: us, useEffect: ue, useRef: ur } = React;
@@ -1136,7 +1291,13 @@ const PERTURBATION_OPTIONS = [
   {
     value: 'multiheader',
     label: 'Multi-header Pivot',
-    desc: 'Table pivoted into a cross-tab / multi-header format',
+    desc: 'Table pivoted into a cross-tab / multi-header format (unchecked: tables stay flat)',
+    group: 'Structure',
+  },
+  {
+    value: 'column_merging',
+    label: 'Column Merging',
+    desc: 'Two columns merged into one, e.g. "Region (Year)" (never on the first table)',
     group: 'Structure',
   },
   {
@@ -1171,6 +1332,16 @@ const PERTURBATION_OPTIONS = [
     group: 'Cell',
   },
 ];
+
+/* Suggested cardinality (distinct values per attribute) of the latent relational source.
+   Parallel questions vary one attribute across tables, so it needs one value per table. */
+const SEQUENTIAL_COL_CARDINALITY = 8;
+const ABLATION_TABLES = { parallel: [2, 3, 5, 10, 20], sequential: [2, 3, 5] };
+function suggestedColCardinality(p) {
+  if (p.sequential) return SEQUENTIAL_COL_CARDINALITY;
+  if (p.num_tables === -1) return Math.max(...ABLATION_TABLES.parallel);
+  return Math.max(2, parseInt(p.num_tables) || 2);
+}
 
 const TYPE_COLORS = {
   openai: 'bg-green-100 text-green-700',
@@ -1529,20 +1700,30 @@ function HistoryPage({ onNavigate, defaultApiKey }) {
                         </span>
                       </div>
                       <div className="flex flex-wrap gap-1.5">
-                        {p.domain && <span className="badge bg-indigo-50 text-indigo-700">{p.domain}</span>}
+                        {p.domain && <span className="badge bg-indigo-50 text-indigo-700" title={p.domain_description || p.domain}><span className="truncate max-w-[16rem]">{p.domain === 'custom' && p.domain_description ? `custom: ${p.domain_description}` : p.domain}</span></span>}
                         {p.question_type && <span className="badge bg-purple-50 text-purple-700">{p.question_type}</span>}
+                        {p.content_style === 'simple' && <span className="badge bg-slate-100 text-slate-600">simple content</span>}
                         {p.num_tables !== undefined && <span className="badge bg-slate-100 text-slate-600">{p.num_tables === -1 ? 'ablation' : `${p.num_tables} tables`}</span>}
                         {p.num_samples !== undefined && <span className="badge bg-slate-100 text-slate-600">{p.num_samples} samples</span>}
+                        {p.sequential && <span className="badge bg-slate-100 text-slate-600">sequential</span>}
+                        {p.perturbation_mode === 'fixed' && (
+                          <span className="badge bg-amber-50 text-amber-700" title={(p.perturbations || []).join(', ')}>fixed perturbations</span>
+                        )}
                       </div>
                       {task.status === 'completed' && (
                         <p className="text-sm font-semibold text-slate-700 mt-2">{task.instance_count} instance(s) generated</p>
+                      )}
+                      {task.status === 'stopped' && (
+                        <p className="text-sm text-slate-600 mt-2">
+                          {task.instance_count > 0 ? `${task.instance_count} instance(s) kept before stopping` : 'Stopped before any instance was generated'}
+                        </p>
                       )}
                       {task.status === 'error' && task.error && (
                         <p className="text-xs text-red-500 mt-1 truncate">{task.error}</p>
                       )}
                     </div>
                     <div className="flex flex-col gap-1.5 flex-shrink-0">
-                      {task.status === 'completed' && task.instance_count > 0 && (
+                      {(task.status === 'completed' || task.status === 'stopped') && task.instance_count > 0 && (
                         <>
                           <button onClick={() => toggleExpand(task.task_id)}
                             className={`flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${isExpanded ? 'bg-indigo-600 text-white' : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700'}`}>
@@ -1760,7 +1941,7 @@ function LeaderboardPage() {
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-1">
                         <div className="flex flex-wrap gap-1">
-                          {tp.domain && <span className="badge bg-indigo-50 text-indigo-700">{tp.domain}</span>}
+                          {tp.domain && <span className="badge bg-indigo-50 text-indigo-700" title={tp.domain_description || tp.domain}><span className="truncate max-w-[12rem]">{tp.domain === 'custom' && tp.domain_description ? `custom: ${tp.domain_description}` : tp.domain}</span></span>}
                           {tp.question_type && <span className="badge bg-purple-50 text-purple-700">{tp.question_type}</span>}
                           {tp.num_tables !== undefined && <span className="badge bg-slate-100 text-slate-600">{tp.num_tables === -1 ? 'ablation' : `${tp.num_tables}t`}</span>}
                         </div>
@@ -1813,15 +1994,19 @@ function App() {
   const [showKey, setShowKey] = useState(false);
   const [params, setParams] = useState({
     domain: 'environmental',
+    domain_description: '',  // topic for the custom domain, asked in a popup on Generate
+    content_style: 'complex',  // complex (verbose wording) | simple (concise, relational wording)
     question_type: 'sum',
     num_tables: 3,
     num_samples: 10,
-    col_cardinality: 20,
+    col_cardinality: suggestedColCardinality({ num_tables: 3, sequential: false }),
+    col_cardinality_auto: true,  // UI-only: follow the suggested value until edited
     num_columns: 21,
     sequential: false,
     perturbation_mode: 'random',
     perturbations: PERTURBATION_OPTIONS.map(p => p.value),
   });
+  const [liveCount, setLiveCount] = useState(0);
 
   const [taskId, setTaskId] = useState(null);
   const [taskStatus, setTaskStatus] = useState('idle');
@@ -1835,7 +2020,7 @@ function App() {
   const [generationErrors, setGenerationErrors] = useState([]);
   const [editingInstance, setEditingInstance] = useState(null);
   const [notification, setNotification] = useState(null);
-  const [showEvaluate, setShowEvaluate] = useState(false);
+  const [askTopic, setAskTopic] = useState(false);
 
   const eventSourceRef = useRef(null);
 
@@ -1844,14 +2029,38 @@ function App() {
     setTimeout(() => setNotification(null), 3500);
   }
 
-  async function handleGenerate() {
+  async function loadInstances(tid) {
+    const ir = await fetch(`/api/tasks/${tid}/instances`);
+    const d = await ir.json();
+    const insts = d.instances || [];
+    const genErrs = d.generation_errors || [];
+    setInstances(insts);
+    setGenerationErrors(genErrs);
+    return { insts, genErrs };
+  }
+
+  async function handleGenerate(customTopic) {
     if (!apiKey.trim()) {
       showNotification('Please enter your OpenAI API key.', 'error');
       return;
     }
+    const numTables = params.num_tables === -1 ? -1 : parseInt(params.num_tables);
+    if (numTables !== -1 && !(numTables >= 2)) {
+      showNotification('Number of tables must be at least 2.', 'error');
+      return;
+    }
+    if (params.domain === 'custom' && typeof customTopic !== 'string') {
+      setAskTopic(true);  // ask the topic first; the popup calls back with it
+      return;
+    }
+    const { col_cardinality_auto, last_num_tables, ...sendParams } = params;
+    sendParams.domain_description = params.domain === 'custom' ? customTopic : '';
+    sendParams.num_tables = numTables;
+    sendParams.col_cardinality = parseInt(params.col_cardinality) || suggestedColCardinality(params);
+
     setInstances([]);
     setGenerationErrors([]);
-    setProgress(0); setCurrent(0);
+    setProgress(0); setCurrent(0); setLiveCount(0);
     setErrorMsg('');
     setTaskStatus('running');
 
@@ -1859,9 +2068,15 @@ function App() {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ ...params, api_key: apiKey }),
+        body: JSON.stringify({ ...sendParams, api_key: apiKey }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        const detail = Array.isArray(data.detail)
+          ? data.detail.map(d => String(d.msg || '').replace(/^Value error, /, '')).join('; ')
+          : (data.detail || 'Failed to start generation');
+        throw new Error(detail);
+      }
       const tid = data.task_id;
       setTaskId(tid);
       setTotal(params.num_samples);
@@ -1877,15 +2092,11 @@ function App() {
         setCurrent(msg.current || 0);
         setTotal(msg.total || params.num_samples);
         setStatusMsg(msg.status_message || '');
+        setLiveCount(msg.instance_count || 0);
         if (msg.status === 'completed') {
           setTaskStatus('completed');
           es.close();
-          const ir = await fetch(`/api/tasks/${tid}/instances`);
-          const id2 = await ir.json();
-          const insts = id2.instances || [];
-          const genErrs = id2.generation_errors || [];
-          setInstances(insts);
-          setGenerationErrors(genErrs);
+          const { insts, genErrs } = await loadInstances(tid);
           if (insts.length > 0) {
             showNotification(`Generated ${insts.length} instances successfully!`);
           } else if (genErrs.length > 0) {
@@ -1896,6 +2107,7 @@ function App() {
         } else if (msg.status === 'stopped') {
           setTaskStatus('stopped');
           es.close();
+          await loadInstances(tid);
         } else if (msg.status === 'error') {
           setTaskStatus('error');
           setErrorMsg(msg.error || 'An error occurred.');
@@ -1915,10 +2127,17 @@ function App() {
 
   async function handleStop() {
     if (!taskId) return;
-    await fetch(`/api/generate/${taskId}`, { method: 'DELETE' });
-    setTaskStatus('stopped');
     if (eventSourceRef.current) eventSourceRef.current.close();
-    showNotification('Generation stopped.', 'info');
+    setTaskStatus('stopped');
+    try {
+      await fetch(`/api/generate/${taskId}`, { method: 'DELETE' });
+      const { insts } = await loadInstances(taskId);
+      showNotification(insts.length > 0
+        ? `Generation stopped — ${insts.length} instance(s) kept.`
+        : 'Generation stopped.', 'info');
+    } catch (e) {
+      showNotification('Generation stopped.', 'info');
+    }
   }
 
   function handleReset() {
@@ -1926,7 +2145,7 @@ function App() {
     setTaskId(null);
     setInstances([]);
     setGenerationErrors([]);
-    setProgress(0); setCurrent(0);
+    setProgress(0); setCurrent(0); setLiveCount(0);
     setErrorMsg('');
   }
 
@@ -1958,8 +2177,8 @@ function App() {
             <div className="w-7 h-7 rounded-lg grad-hero flex items-center justify-center">
               <Ico.Sparkles className="w-3.5 h-3.5 text-white"/>
             </div>
-            <span className="font-bold text-slate-900 text-sm hidden sm:block">TabQA Generator</span>
-            <span className="hidden lg:flex items-center badge bg-indigo-100 text-indigo-700 text-[10px]">Submitted to CIKM 2026</span>
+            <span className="font-bold text-slate-900 text-sm hidden sm:block">TabgenQA</span>
+            <span className="hidden lg:flex items-center badge bg-indigo-100 text-indigo-700 text-[10px]">Demo at CIKM 2026</span>
           </div>
 
           {/* Nav tabs */}
@@ -2013,21 +2232,11 @@ function App() {
             <div className="max-w-7xl mx-auto">
               <div className="max-w-2xl">
                 <h1 className="text-3xl sm:text-4xl font-extrabold text-white leading-tight">
-                  Tabular QA Benchmark<br/>Generator
+                  TabgenQA
                 </h1>
                 <p className="mt-3 text-indigo-200 text-base leading-relaxed">
                   Generate synthetic multi-table numerical QA datasets with controlled perturbations, powered by <strong className="text-white">Gradino</strong>.
                 </p>
-                <div className="flex flex-wrap gap-3 mt-5">
-                  {[['Multi-table','Parallel & sequential multi-hop'],
-                    ['LLM-powered','GPT-driven table & question generation'],
-                    ['Editable output','Inspect and refine every instance']].map(([title]) => (
-                    <div key={title} className="flex items-center gap-1.5 bg-white/10 backdrop-blur-sm rounded-lg px-3 py-1.5">
-                      <Ico.Check className="w-3.5 h-3.5 text-indigo-300"/>
-                      <span className="text-white text-xs font-medium">{title}</span>
-                    </div>
-                  ))}
-                </div>
               </div>
             </div>
           </header>
@@ -2038,29 +2247,6 @@ function App() {
               {/* Left: config */}
               <div className="space-y-4">
                 <ConfigPanel params={params} onChange={setParams} onGenerate={handleGenerate} disabled={isRunning}/>
-                {isDone && instances.length > 0 && (
-                  <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-2 shadow-sm">
-                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Download Dataset</p>
-                    <div className="flex gap-2">
-                      <a href={`/api/tasks/${taskId}/download?fmt=csv`} download
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition-colors">
-                        <Ico.Download className="w-3.5 h-3.5"/> CSV
-                      </a>
-                      <a href={`/api/tasks/${taskId}/download?fmt=json`} download
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors">
-                        <Ico.Download className="w-3.5 h-3.5"/> JSON
-                      </a>
-                    </div>
-                    <button onClick={() => setShowEvaluate(true)}
-                      className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold transition-colors">
-                      <Ico.Flask className="w-3.5 h-3.5"/> Evaluate with a Model
-                    </button>
-                    <button onClick={handleReset}
-                      className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 text-xs font-semibold transition-colors border border-slate-200">
-                      <Ico.RefreshCw className="w-3.5 h-3.5"/> New Generation
-                    </button>
-                  </div>
-                )}
               </div>
 
               {/* Right: output */}
@@ -2093,7 +2279,7 @@ function App() {
                     <div className="mb-2">
                       <div className="flex justify-between text-xs text-slate-500 mb-1">
                         <span>{pct}% complete</span>
-                        <span>{current} / {total} samples</span>
+                        <span>{current} / {total} samples · {liveCount} instance(s) ready</span>
                       </div>
                       <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
                         <div className="progress-bar h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500"
@@ -2101,7 +2287,7 @@ function App() {
                       </div>
                     </div>
                     <p className="text-xs text-slate-400 mt-3">
-                      Generation may take several minutes. Each sample requires multiple LLM API calls.
+                      Generation may take several minutes. Each sample requires multiple LLM API calls. Stopping keeps the samples already generated.
                     </p>
                   </div>
                 )}
@@ -2126,8 +2312,8 @@ function App() {
                   <div className="bg-white rounded-2xl border border-amber-200 p-6 fade-up">
                     <p className="font-bold text-amber-700 mb-3">Generation stopped</p>
                     {instances.length > 0
-                      ? <p className="text-sm text-slate-600">{instances.length} instance(s) were generated before stopping.</p>
-                      : <p className="text-sm text-slate-500">No instances were generated.</p>
+                      ? <p className="text-sm text-slate-600">The {instances.length} instance(s) completed before stopping were kept: you can review them below, and download or evaluate them from the History tab.</p>
+                      : <p className="text-sm text-slate-500">No sample had been completed yet, so no instances were kept.</p>
                     }
                     <button onClick={handleReset} className="mt-4 flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-sm rounded-lg transition-colors">
                       <Ico.RefreshCw className="w-4 h-4"/> Start over
@@ -2179,7 +2365,7 @@ function App() {
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-white py-5 px-4 mt-8">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400">
-          <span>TabQA Generator — Demo for <strong className="text-slate-600">Submitted to CIKM 2026</strong></span>
+          <span>TabgenQA — <strong className="text-slate-600">Demo at CIKM 2026</strong></span>
           <span>Built on <a href="https://github.com/softlab-unimore/Gradino" target="_blank" rel="noreferrer" className="text-indigo-500 hover:underline font-medium">Gradino</a> by softlab-unimore</span>
         </div>
       </footer>
@@ -2196,14 +2382,16 @@ function App() {
         </ErrorBoundary>
       )}
 
-      {/* Evaluate modal (from generate page) */}
-      {showEvaluate && taskId && (
-        <EvaluateModal
-          taskId={taskId}
-          instanceCount={instances.length}
-          defaultApiKey={apiKey}
-          onClose={() => setShowEvaluate(false)}
-          onDone={() => { setShowEvaluate(false); showNotification('Evaluation saved to Leaderboard!'); }}
+      {/* Topic popup for the custom domain */}
+      {askTopic && (
+        <CustomTopicModal
+          initialTopic={params.domain_description}
+          onClose={() => setAskTopic(false)}
+          onConfirm={topic => {
+            setAskTopic(false);
+            setParams(p => ({ ...p, domain_description: topic }));  // prefilled next time
+            handleGenerate(topic);
+          }}
         />
       )}
 

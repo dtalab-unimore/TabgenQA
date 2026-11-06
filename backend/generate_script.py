@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
 Worker script that runs Gradino generation in a subprocess.
-Patches tqdm before importing Gradino to capture progress.
-Outputs JSON lines to stdout for the parent process to read.
+Samples are generated one at a time and streamed as soon as they are ready, so that
+progress is exact and already generated samples survive a stop.
+Outputs JSON lines to stdout for the parent process to read:
+  {"type": "status",   "message": ...}
+  {"type": "progress", "current": i, "total": n, "progress": f, "desc": ...}
+  {"type": "sample",   "data": {num_tables: {method: {perturbation: [records]}}}, "errors": [...]}  (one per sample)
+  {"type": "done",     "errors": [...]}  (all errors, once at the end)
+  {"type": "error",    "message": ..., "traceback": ...}
 """
 
 import sys
@@ -15,40 +21,61 @@ def emit(msg: dict):
     print(json.dumps(msg), flush=True)
 
 
-# ── Patch tqdm BEFORE any Gradino imports ──────────────────────────────────
-try:
-    import tqdm as _tqdm_module
-    from tqdm import tqdm as _orig_tqdm
+def flatten_errors(error_logs) -> list:
+    """Gradino returns a list (single table) or a dict {num_tables or "ablation": [errors]} (multi-table)."""
+    if not error_logs:
+        return []
+    if isinstance(error_logs, dict):
+        out = []
+        for key, errs in error_logs.items():
+            prefix = "[ablation]" if key == "ablation" else f"[{key} tables]"
+            for err in errs or []:
+                if err:
+                    out.append(f"{prefix} {err}")
+        return out
+    return [str(e) for e in error_logs if e]
 
-    class _ProgressTqdm(_orig_tqdm):
-        def update(self, n=1):
-            result = super().update(n)
-            try:
-                if self.total and self.total > 0:
-                    emit({
-                        "type": "progress",
-                        "current": int(self.n),
-                        "total": int(self.total),
-                        "progress": float(min(self.n / self.total, 1.0)),
-                        "desc": self.desc or "",
-                    })
-            except Exception:
-                pass
-            return result
 
-    _tqdm_module.tqdm = _ProgressTqdm
-    try:
-        import tqdm.auto as _tqdm_auto
-        _tqdm_auto.tqdm = _ProgressTqdm
-    except Exception:
-        pass
-    try:
-        import tqdm.std as _tqdm_std
-        _tqdm_std.tqdm = _ProgressTqdm
-    except Exception:
-        pass
-except ImportError:
-    pass  # tqdm not installed — no progress bars
+def serialize_samples(samples) -> dict:
+    """Convert Gradino's {num_tables: {method: {perturbation: DataFrame}}} into JSON-serialisable records."""
+    import pandas as pd
+
+    output: dict = {}
+    for nt_key in samples or {}:
+        output[str(nt_key)] = {}
+        for k1 in samples[nt_key]:
+            output[str(nt_key)][k1] = {}
+            for k2 in samples[nt_key][k1]:
+                df = samples[nt_key][k1][k2]
+                if not isinstance(df, pd.DataFrame):
+                    print(f"[DEBUG] skipping non-DataFrame [{nt_key}][{k1}][{k2}]: {type(df).__name__}", file=sys.stderr, flush=True)
+                    continue
+                records = []
+                for _, row in df.iterrows():
+                    record: dict = {}
+                    for col in df.columns:
+                        val = row[col]
+                        if isinstance(val, float) and val != val:  # NaN
+                            record[col] = None
+                        elif isinstance(val, (int, float, bool)):
+                            record[col] = val
+                        else:
+                            s = str(val)
+                            if s and s[0] in ('[', '{'):
+                                try:
+                                    record[col] = json.loads(s)
+                                    continue
+                                except Exception:
+                                    pass
+                            record[col] = s
+                    records.append(record)
+                if records:
+                    output[str(nt_key)][k1][k2] = records
+    return output
+
+
+def count_records(output: dict) -> int:
+    return sum(len(output[a][b][c]) for a in output for b in output[a] for c in output[a][b])
 
 
 # ── Main generation logic ──────────────────────────────────────────────────
@@ -87,113 +114,70 @@ def main():
     # Build args dict (Gradino expects a plain dict, not argparse.Namespace)
     args = {
         "domain": params.get("domain", "environmental"),
+        "domain_description": params.get("domain_description") or "",
+        "content_style": params.get("content_style") or "complex",
         "question_type": params.get("question_type", "sum"),
         "num_tables": int(params.get("num_tables", 3)),
         "num_samples": int(params.get("num_samples", 10)),
         "col_cardinality": int(params.get("col_cardinality", 20)),
         "num_columns": int(params.get("num_columns", 21)),
         "sequential": bool(params.get("sequential", False)),
+        "perturbation_mode": params.get("perturbation_mode", "random"),
+        "perturbations": params.get("perturbations") or [],
     }
 
     try:
         generator = MTAutoGen(args)
-
-        num_tables = args["num_tables"]
-        sequential = args["sequential"]
-        domain = args["domain"]
-        method = args["question_type"]
-        num_samples = args["num_samples"]
-        col_cardinality = args["col_cardinality"]
-        num_columns = args["num_columns"]
-
-        emit({"type": "status", "message": f"Calling run_generation(num_tables={num_tables}, method={method}, num_samples={num_samples}, domain={domain})"})
-
-        if num_tables == -1:
-            samples, error_logs = generator.run_generation(
-                num_tables=-1,
-                num_samples=num_samples,
-                domain=domain,
-                sequential=sequential,
-            )
-        else:
-            samples, error_logs = generator.run_generation(
-                num_tables=num_tables,
-                method=method,
-                num_samples=num_samples,
-                domain=domain,
-                col_cardinality=col_cardinality,
-                num_columns=num_columns,
-                sequential=sequential,
-            )
-
-        # Safely convert error_logs to a plain list (Gradino may return a custom object)
-        try:
-            error_list = [str(e) for e in (error_logs or [])]
-        except Exception as _el_exc:
-            error_list = [f"(could not read error_logs: {_el_exc})"]
-
-        # Diagnostic: dump to stderr so it appears in docker compose logs
-        try:
-            print(f"[DEBUG] samples type={type(samples).__name__} keys={list(samples.keys()) if hasattr(samples, 'keys') else '?'}", file=sys.stderr, flush=True)
-            for sk in (samples or {}):
-                for mk in samples[sk]:
-                    for pk in samples[sk][mk]:
-                        v = samples[sk][mk][pk]
-                        print(f"[DEBUG]  [{sk!r}][{mk!r}][{pk!r}] → {type(v).__name__} shape={getattr(v, 'shape', '?')}", file=sys.stderr, flush=True)
-        except Exception as _dbg_exc:
-            print(f"[DEBUG] samples inspection failed: {_dbg_exc}", file=sys.stderr, flush=True)
-        print(f"[DEBUG] error_list ({len(error_list)}): {error_list[:3]}", file=sys.stderr, flush=True)
-
-        # Serialize DataFrames to JSON-serialisable dicts
-        import pandas as pd
-
-        output: dict = {}
-        for nt_key in samples:
-            output[str(nt_key)] = {}
-            for k1 in samples[nt_key]:
-                output[str(nt_key)][k1] = {}
-                for k2 in samples[nt_key][k1]:
-                    df = samples[nt_key][k1][k2]
-                    if not isinstance(df, pd.DataFrame):
-                        print(f"[DEBUG] skipping non-DataFrame [{nt_key}][{k1}][{k2}]: {type(df).__name__}", file=sys.stderr, flush=True)
-                        continue
-                    records = []
-                    for _, row in df.iterrows():
-                        record: dict = {}
-                        for col in df.columns:
-                            val = row[col]
-                            if isinstance(val, float) and val != val:  # NaN
-                                record[col] = None
-                            elif isinstance(val, (int, float, bool)):
-                                record[col] = val
-                            else:
-                                s = str(val)
-                                if s and s[0] in ('[', '{'):
-                                    try:
-                                        record[col] = json.loads(s)
-                                        continue
-                                    except Exception:
-                                        pass
-                                record[col] = s
-                        records.append(record)
-                    output[str(nt_key)][k1][k2] = records
-
-        total_records = sum(len(output[a][b][c]) for a in output for b in output[a] for c in output[a][b])
-        print(f"[DEBUG] output keys={list(output.keys())} total_records={total_records}", file=sys.stderr, flush=True)
-
-        emit({
-            "type": "result",
-            "data": output,
-            "errors": error_list,
-        })
-
     except Exception as exc:
-        emit({
-            "type": "error",
-            "message": str(exc),
-            "traceback": traceback.format_exc(),
-        })
+        emit({"type": "error", "message": f"Failed to initialise Gradino: {exc}", "traceback": traceback.format_exc()})
         sys.exit(1)
+
+    num_samples = args["num_samples"]
+    emit({"type": "status", "message": (
+        f"Generating {num_samples} sample(s): num_tables={'ablation' if args['num_tables'] == -1 else args['num_tables']}, "
+        f"method={args['question_type']}, domain={args['domain']}"
+        + (f" ({args['domain_description'][:80]})" if args["domain_description"] else "")
+        + f", content={args['content_style']}, sequential={args['sequential']}, "
+        f"perturbations={args['perturbation_mode']}"
+    )})
+    emit({"type": "progress", "current": 0, "total": num_samples, "progress": 0.0, "desc": "Generating samples…"})
+
+    all_errors: list = []
+    produced = 0
+    for i in range(num_samples):
+        try:
+            samples, error_logs = generator.run_generation(
+                num_tables=args["num_tables"],
+                method=args["question_type"],
+                num_samples=1,
+                domain=args["domain"],
+                col_cardinality=args["col_cardinality"],
+                num_columns=args["num_columns"],
+                sequential=args["sequential"],
+            )
+            errors = flatten_errors(error_logs)
+            data = serialize_samples(samples)
+        except Exception as exc:
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            errors = [f"sample {i + 1}: {exc!r}"]
+            data = {}
+
+        all_errors.extend(errors)
+        n_records = count_records(data)
+        produced += n_records
+        # emitted for every sample (even when empty) so that errors also survive a stop
+        emit({"type": "sample", "data": data, "errors": errors})
+        print(f"[DEBUG] sample {i + 1}/{num_samples}: {n_records} record(s), {len(errors)} error(s)", file=sys.stderr, flush=True)
+
+        emit({
+            "type": "progress",
+            "current": i + 1,
+            "total": num_samples,
+            "progress": (i + 1) / num_samples,
+            "desc": f"Generated {i + 1}/{num_samples} sample(s) · {produced} instance(s) so far",
+        })
+
+    emit({"type": "done", "errors": all_errors})
 
 
 if __name__ == "__main__":

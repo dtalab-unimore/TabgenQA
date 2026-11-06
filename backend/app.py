@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 app = FastAPI(title="TabQA Generator API", version="1.0.0")
 
@@ -45,15 +45,61 @@ eval_tasks: dict = {}
 
 # ── Pydantic models ─────────────────────────────────────────────────────────
 
+BUILTIN_DOMAINS = ("environmental", "finance", "healthcare", "products")
+MAX_DOMAIN_DESCRIPTION = 2000
+
+
 class GenerationParams(BaseModel):
-    domain: str = "environmental"
+    domain: str = "environmental"       # one of BUILTIN_DOMAINS, or "custom"
+    domain_description: str = ""        # topic / description of the topic, required for "custom"
+    content_style: str = "complex"      # complex (verbose, web-table-like wording) | simple (concise, relational)
     question_type: str = "sum"
     num_tables: int = 3
     num_samples: int = 10
     col_cardinality: int = 20
     num_columns: int = 21
     sequential: bool = False
+    perturbation_mode: str = "random"   # random | fixed
+    perturbations: list[str] = []       # used when perturbation_mode == "fixed"
     api_key: str = ""
+
+    @field_validator("num_tables")
+    @classmethod
+    def _check_num_tables(cls, v: int) -> int:
+        if v != -1 and v < 2:
+            raise ValueError("num_tables must be at least 2 (or -1 for ablation mode)")
+        return v
+
+    @field_validator("col_cardinality", "num_columns", "num_samples")
+    @classmethod
+    def _check_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be a positive integer")
+        return v
+
+    @model_validator(mode="after")
+    def _check_domain(self):
+        if self.domain not in (*BUILTIN_DOMAINS, "custom"):
+            raise ValueError(f"unknown domain '{self.domain}'")
+        if self.content_style not in ("complex", "simple"):
+            raise ValueError("content_style must be 'complex' or 'simple'")
+        self.domain_description = self.domain_description.strip()
+        if self.domain == "custom":
+            if not self.domain_description:
+                raise ValueError("the custom domain requires a topic description")
+            if len(self.domain_description) > MAX_DOMAIN_DESCRIPTION:
+                raise ValueError(f"the topic description must be at most {MAX_DOMAIN_DESCRIPTION} characters")
+        else:
+            self.domain_description = ""   # only meaningful for the custom domain
+        return self
+
+    @model_validator(mode="after")
+    def _check_perturbations(self):
+        if self.perturbation_mode not in ("random", "fixed"):
+            raise ValueError("perturbation_mode must be 'random' or 'fixed'")
+        if self.perturbation_mode == "fixed" and not self.perturbations:
+            raise ValueError("select at least one perturbation in fixed mode")
+        return self
 
 
 class EvalParams(BaseModel):
@@ -88,10 +134,10 @@ def _to_list(raw) -> list:
     return [raw]
 
 
-def _flatten_instances(data: dict) -> list:
-    """Convert Gradino's nested {nt: {method: {pert: [records]}}} into a flat list."""
+def _flatten_instances(data: dict, start: int = 0) -> list:
+    """Convert Gradino's nested {nt: {method: {pert: [records]}}} into a flat list, numbering ids from `start`."""
     instances = []
-    idx = 0
+    idx = start
     for nt_key in sorted(data.keys(), key=lambda k: int(k) if k.lstrip("-").isdigit() else k):
         for method_key, pert_dict in data[nt_key].items():
             for pert_key, records in pert_dict.items():
@@ -168,6 +214,10 @@ async def startup_event():
         try:
             with open(os.path.join(TASKS_DIR, fname), encoding="utf-8") as f:
                 meta = json.load(f)
+            if meta.get("status") == "running":
+                # the worker process died with the previous server instance
+                meta["status"] = "stopped"
+                meta["status_message"] = "Interrupted by a server restart"
             tasks[task_id] = {
                 **{k: v for k, v in meta.items() if k != "task_id"},
                 "instances": [],
@@ -186,6 +236,9 @@ async def startup_event():
         try:
             with open(meta_path, encoding="utf-8") as f:
                 meta = json.load(f)
+            if meta.get("status") == "running":
+                meta["status"] = "error"
+                meta["error"] = "Interrupted by a server restart"
             eval_tasks[eval_id] = {
                 **{k: v for k, v in meta.items() if k != "eval_id"},
                 "process": None,
@@ -196,6 +249,14 @@ async def startup_event():
 
 
 # ── Background generation task ───────────────────────────────────────────────
+
+def _terminate(proc):
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+
 
 async def _run_generation(task_id: str, params: dict):
     task = tasks[task_id]
@@ -235,12 +296,7 @@ async def _run_generation(task_id: str, params: dict):
 
         async for raw_line in proc.stdout:
             if task.get("stop_requested"):
-                proc.terminate()
-                await proc.wait()
-                await stderr_task
-                task["status"] = "stopped"
-                _persist_task(task_id)
-                return
+                break  # instances received so far are kept; the process is terminated below
 
             line = raw_line.decode().strip()
             if not line:
@@ -255,10 +311,13 @@ async def _run_generation(task_id: str, params: dict):
                     task["status_message"] = msg.get("desc", "Generating…")
                 elif mtype == "status":
                     task["status_message"] = msg.get("message", "")
-                elif mtype == "result":
+                elif mtype == "sample":
+                    # one generated sample: append its instances (ids continue from the current count)
+                    task["instances"].extend(_flatten_instances(msg.get("data", {}), start=len(task["instances"])))
+                    task["generation_errors"].extend(msg.get("errors", []))
+                elif mtype == "done":
                     task["progress"] = 1.0
-                    task["instances"] = _flatten_instances(msg.get("data", {}))
-                    task["generation_errors"] = msg.get("errors", [])
+                    task["generation_errors"] = msg.get("errors", task["generation_errors"])
                 elif mtype == "error":
                     task["status"] = "error"
                     task["error"] = msg.get("message", "Unknown error")
@@ -269,11 +328,13 @@ async def _run_generation(task_id: str, params: dict):
             except json.JSONDecodeError:
                 pass
 
+        if task.get("stop_requested"):
+            _terminate(proc)
         await proc.wait()
         await stderr_task
         stderr_output = b"".join(stderr_chunks).decode(errors="replace").strip()
         if stderr_output:
-            print(f"[generate_script stderr]\n{stderr_output[:4000]}", file=sys.stderr, flush=True)
+            print(f"[generate_script stderr]\n{stderr_output[-4000:]}", file=sys.stderr, flush=True)
 
         if task["status"] == "running":
             if proc.returncode == 0:
@@ -445,9 +506,16 @@ async def stream_progress(task_id: str):
 async def stop_generation(task_id: str):
     if task_id not in tasks:
         raise HTTPException(404, "Task not found")
-    tasks[task_id]["stop_requested"] = True
-    tasks[task_id]["status"] = "stopped"
-    return {"status": "stop_requested"}
+    task = tasks[task_id]
+    if task["status"] != "running":
+        return {"status": task["status"], "instance_count": _get_instance_count(task)}
+    task["stop_requested"] = True
+    task["status"] = "stopped"
+    task["status_message"] = "Stopped by the user"
+    # kill the worker right away (it may be blocked on an LLM call); finished samples are already stored
+    _terminate(task.get("process"))
+    _persist_task(task_id)
+    return {"status": "stopped", "instance_count": _get_instance_count(task)}
 
 
 @app.get("/api/tasks")
