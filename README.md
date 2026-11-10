@@ -9,7 +9,7 @@ For any help setting up the system, open a Github issue or write to `micheleluca
 - **Live progress**: real-time progress bar and status updates during generation
 - **Stop control**: cancel a running generation at any time
 - **Instance editor**: edit questions, answers, and tables (cell values, hierarchical headers, schema changes, add/remove rows & columns)
-- **Export** — download the dataset as CSV or JSON
+- **Export**: download the dataset as CSV or JSON
 
 ## Quick Start
 
