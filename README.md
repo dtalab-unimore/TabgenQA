@@ -1,14 +1,14 @@
 # TabgenQA
 
-A web-based demo for generating tabular Question-Answering benchmarks, powered by Gradino. Submitted to the CIKM 2026 conference demo track.  
+A web-based demo for generating tabular Question-Answering benchmarks, powered by Gradino. Accepted at CIKM 2026 demo track.  
 For any help setting up the system, open a Github issue or write to `micheleluca.contalbo@unimore.it`
 
 ## Features
 
-- **Parameter configuration** — set domain, question type, table count, sample count, cardinality, and column count via a clean UI
-- **Live progress** — real-time progress bar and status updates during generation
-- **Stop control** — cancel a running generation at any time
-- **Instance editor** — edit questions, answers, and tables (cell values, hierarchical headers, schema changes, add/remove rows & columns)
+- **Parameter configuration**: set domain, question type, table count, sample count, cardinality, and column count
+- **Live progress**: real-time progress bar and status updates during generation
+- **Stop control**: cancel a running generation at any time
+- **Instance editor**: edit questions, answers, and tables (cell values, hierarchical headers, schema changes, add/remove rows & columns)
 - **Export** — download the dataset as CSV or JSON
 
 ## Quick Start
@@ -43,34 +43,19 @@ Then open **http://localhost:8000** in your browser.
    |-----------|-------------|
    | Domain | Domain for few-shot table examples (environmental / finance / healthcare / products) |
    | Question Type | Aggregation type: sum, average, or superlative |
-   | Number of Tables | Tables per instance; set to `-1` for ablation mode (2,3,5,10,20) |
+   | Number of Tables | Tables per instance |
    | Num Samples | How many instances to generate |
-   | Col. Cardinality | Cardinality of the latent relational source |
-   | Num Columns | Number of columns in the latent relational source |
+   | Col. Cardinality | Cardinality of the Gradino's latent relational source |
+   | Num Columns | Number of columns in Gradino's latent relational source |
    | Sequential | Enable multi-hop questions across tables via foreign keys |
 3. Click **Generate Benchmark**
 4. Watch the progress bar; click **Stop** to cancel at any time
 5. Once complete, click the **pencil icon** on any instance to edit:
-   - **Question & Answer tab** — edit the question text and expected answer
-   - **Tables tab** — full table editor: click cells to select, double-click to edit, use the toolbar to add/remove rows and columns, adjust colspan/rowspan for hierarchical headers
+   - **Question & Answer tab**: edit the question text and expected answer
+   - **Tables tab**: full table editor: click cells to select, double-click to edit, use the toolbar to add/remove rows and columns, adjust colspan/rowspan for hierarchical headers
 6. **Download** the final dataset as CSV or JSON
 7. or **Evaluate** the models on the created datasets and analyze their performance in the **Leaderboard** tab
 
-## Architecture
+## Citation
 
-```
-TabgenQA/
-├── docker-compose.yml       # Single-service Docker Compose config
-├── Dockerfile               # Clones Gradino + installs deps
-├── backend/
-│   ├── app.py               # FastAPI application (API + static serving)
-│   ├── generate_script.py   # Subprocess worker; patches tqdm for progress
-│   ├── requirements.txt     # FastAPI + uvicorn
-│   └── static/
-│       └── index.html       # React + Tailwind single-page app (CDN, no build step)
-└── output/                  # (created at runtime) mounted volume for output files
-```
 
-## Notes
-
-- API keys entered in the UI are sent to the backend over localhost only and are never persisted to disk.
