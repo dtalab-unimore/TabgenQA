@@ -58,4 +58,22 @@ Then open **http://localhost:8000** in your browser.
 
 ## Citation
 
-
+```
+@inproceedings{10.1145/3799682.3840263,
+author = {Contalbo, Michele Luca and Paganelli, Matteo and Papotti, Paolo and Guerra, Francesco},
+title = {TabgenQA: A Platform for Non-Relational, Multi-Tabular, Numerical QA Benchmark Generation and LLM Evaluation},
+year = {2026},
+isbn = {9798400725395},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3799682.3840263},
+doi = {10.1145/3799682.3840263},
+abstract = {Large language models (LLMs) are widely used for tabular data analysis, but their performance often does not transfer from standard Table QA benchmarks to real-world settings, where tables are typically non-relational, with hierarchical headers, merged cells, inconsistent units, noise, and implicit cross-table dependencies. We present name, an interactive system built on top of gradino for generating verifiable non-relational multi-table QA benchmarks and evaluating LLMs on them. Users configure domain-specific benchmark settings, inspect and refine generated instances, and compare API-based or locally deployed models through live leaderboards and error analysis views. Across procurement, failure diagnosis, and benchmark curation scenarios, name provides an end-to-end workflow for deployment-oriented assessment of LLMs on real-world tabular data.},
+booktitle = {Proceedings of the 35th ACM International Conference on Information and Knowledge Management},
+pages = {9102–9107},
+numpages = {6},
+keywords = {benchmark generation, llm evaluation, tabular data analysis},
+location = {Rome, Italy},
+series = {CIKM '26}
+}
+```
